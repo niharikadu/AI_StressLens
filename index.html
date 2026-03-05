@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>StressLens AI — Exam Anxiety Detector</title>
+
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+</head>
+
+
+<body>
+
+
+<!-- HEADER -->
+<header class="header">
+
+<div class="header-inner">
+
+<div class="logo">
+<span class="logo-icon">🧠</span>
+<span class="logo-text">StressLens<span class="logo-ai"> AI</span></span>
+</div>
+
+<p class="tagline">AI-Powered Exam Anxiety Detection System</p>
+
+</div>
+
+</header>
+
+
+
+<!-- MAIN CONTENT -->
+
+<main class="container">
+
+
+<!-- HERO -->
+
+<section class="hero">
+
+<h1>How anxious are you about your exams?</h1>
+
+<p>
+Fill the form below honestly. Our AI system will analyze your responses
+and detect your exam anxiety level.
+</p>
+
+</section>
+
+
+
+
+<!-- FORM CARD -->
+
+<section class="card form-card">
+
+<h2 class="section-title">📝 Self Assessment Form</h2>
+
+
+
+<!-- TEXT RESPONSE -->
+
+<div class="form-group">
+
+<label for="text_response">
+
+How do you feel about your upcoming exams?
+
+<span class="required">*</span>
+
+</label>
+
+<textarea
+id="text_response"
+rows="4"
+placeholder="Example: I feel extremely stressed about exams and cannot sleep properly..."
+></textarea>
+
+<span class="helper">
+Be honest — this information is only used for analysis
+</span>
+
+</div>
+
+
+
+<!-- METRICS -->
+
+<h3 class="sub-title">📊 Lifestyle & Health Metrics</h3>
+
+
+<div class="input-grid">
+
+
+<div class="form-group">
+<label>❤️ Resting Heart Rate</label>
+<input type="number" id="heart_rate" placeholder="e.g. 80">
+</div>
+
+
+<div class="form-group">
+<label>😴 Sleep Hours</label>
+<input type="number" id="sleep_hours" placeholder="e.g. 6">
+</div>
+
+
+<div class="form-group">
+<label>📚 Study Hours / Day</label>
+<input type="number" id="study_hours_per_day" placeholder="e.g. 8">
+</div>
+
+
+<div class="form-group">
+<label>🗓 Days Since Last Break</label>
+<input type="number" id="days_since_last_break" placeholder="e.g. 7">
+</div>
+
+
+<div class="form-group">
+<label>🤝 Social Interactions / Week</label>
+<input type="number" id="social_interactions_per_week" placeholder="e.g. 3">
+</div>
+
+
+<div class="form-group">
+<label>💧 Water Intake (liters)</label>
+<input type="number" id="water_intake_liters" placeholder="e.g. 2">
+</div>
+
+
+<div class="form-group">
+<label>🏃 Exercise Minutes / Day</label>
+<input type="number" id="exercise_minutes_per_day" placeholder="e.g. 10">
+</div>
+
+
+</div>
+
+
+
+<!-- ANALYZE BUTTON -->
+
+<button class="btn-analyze" onclick="analyzeAnxiety()">
+
+🔍 Analyze My Anxiety Level
+
+</button>
+
+
+</section>
+
+
+
+
+<!-- RESULT CARD -->
+
+<section class="card result-card hidden" id="resultCard">
+
+<h2 class="section-title">📊 Result</h2>
+
+
+<div class="result-badge-wrapper">
+
+<div class="result-badge" id="resultBadge"></div>
+
+</div>
+
+</section>
+
+
+
+
+<!-- INFO SECTION -->
+
+<section class="info-grid">
+
+
+<div class="info-card">
+
+<div class="info-icon">🔒</div>
+
+<h4>100% Private</h4>
+
+<p>Your responses are never stored.</p>
+
+</div>
+
+
+<div class="info-card">
+
+<div class="info-icon">🤖</div>
+
+<h4>AI Powered</h4>
+
+<p>Machine Learning model trained on exam stress data.</p>
+
+</div>
+
+
+<div class="info-card">
+
+<div class="info-icon">💡</div>
+
+<h4>Smart Insights</h4>
+
+<p>Get personalized suggestions to manage exam anxiety.</p>
+
+</div>
+
+
+</section>
+
+
+
+</main>
+
+
+
+
+<!-- FOOTER -->
+
+<footer class="footer">
+
+<p>
+StressLens AI — BTech Project
+</p>
+
+<p>
+⚠️ Educational use only
+</p>
+
+</footer>
+
+
+
+
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+
+
+</body>
+</html>
