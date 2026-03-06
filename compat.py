@@ -1,106 +1,165 @@
-"""
-requests.compat
-~~~~~~~~~~~~~~~
+# Copyright (C) 2008, 2009 Michael Trier (mtrier@gmail.com) and contributors
+#
+# This module is part of GitPython and is released under the
+# 3-Clause BSD License: https://opensource.org/license/bsd-3-clause/
 
-This module previously handled import compatibility issues
-between Python 2 and Python 3. It remains for backwards
-compatibility until the next major version.
+"""Utilities to help provide compatibility with Python 3.
+
+This module exists for historical reasons. Code outside GitPython may make use of public
+members of this module, but is unlikely to benefit from doing so. GitPython continues to
+use some of these utilities, in some cases for compatibility across different platforms.
 """
 
-import importlib
+import locale
+import os
 import sys
+import warnings
 
-# -------
-# urllib3
-# -------
-from urllib3 import __version__ as urllib3_version
+from gitdb.utils.encoding import force_bytes, force_text  # noqa: F401
 
-# Detect which major version of urllib3 is being used.
-try:
-    is_urllib3_1 = int(urllib3_version.split(".")[0]) == 1
-except (TypeError, AttributeError):
-    # If we can't discern a version, prefer old functionality.
-    is_urllib3_1 = True
+# typing --------------------------------------------------------------------
 
-# -------------------
-# Character Detection
-# -------------------
-
-
-def _resolve_char_detection():
-    """Find supported character detection libraries."""
-    chardet = None
-    for lib in ("chardet", "charset_normalizer"):
-        if chardet is None:
-            try:
-                chardet = importlib.import_module(lib)
-            except ImportError:
-                pass
-    return chardet
-
-
-chardet = _resolve_char_detection()
-
-# -------
-# Pythons
-# -------
-
-# Syntax sugar.
-_ver = sys.version_info
-
-#: Python 2.x?
-is_py2 = _ver[0] == 2
-
-#: Python 3.x?
-is_py3 = _ver[0] == 3
-
-# json/simplejson module import resolution
-has_simplejson = False
-try:
-    import simplejson as json
-
-    has_simplejson = True
-except ImportError:
-    import json
-
-if has_simplejson:
-    from simplejson import JSONDecodeError
-else:
-    from json import JSONDecodeError
-
-# Keep OrderedDict for backwards compatibility.
-from collections import OrderedDict
-from collections.abc import Callable, Mapping, MutableMapping
-from http import cookiejar as cookielib
-from http.cookies import Morsel
-from io import StringIO
-
-# --------------
-# Legacy Imports
-# --------------
-from urllib.parse import (
-    quote,
-    quote_plus,
-    unquote,
-    unquote_plus,
-    urldefrag,
-    urlencode,
-    urljoin,
-    urlparse,
-    urlsplit,
-    urlunparse,
-)
-from urllib.request import (
-    getproxies,
-    getproxies_environment,
-    parse_http_list,
-    proxy_bypass,
-    proxy_bypass_environment,
+from typing import (
+    Any,  # noqa: F401
+    AnyStr,
+    Dict,  # noqa: F401
+    IO,  # noqa: F401
+    List,
+    Optional,
+    TYPE_CHECKING,
+    Tuple,  # noqa: F401
+    Type,  # noqa: F401
+    Union,
+    overload,
 )
 
-builtin_str = str
-str = str
-bytes = bytes
-basestring = (str, bytes)
-numeric_types = (int, float)
-integer_types = (int,)
+# ---------------------------------------------------------------------------
+
+
+_deprecated_platform_aliases = {
+    "is_win": os.name == "nt",
+    "is_posix": os.name == "posix",
+    "is_darwin": sys.platform == "darwin",
+}
+
+
+def _getattr(name: str) -> Any:
+    try:
+        value = _deprecated_platform_aliases[name]
+    except KeyError:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from None
+
+    warnings.warn(
+        f"{__name__}.{name} and other is_<platform> aliases are deprecated. "
+        "Write the desired os.name or sys.platform check explicitly instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return value
+
+
+if not TYPE_CHECKING:  # Preserve static checking for undefined/misspelled attributes.
+    __getattr__ = _getattr
+
+
+def __dir__() -> List[str]:
+    return [*globals(), *_deprecated_platform_aliases]
+
+
+is_win: bool
+"""Deprecated alias for ``os.name == "nt"`` to check for native Windows.
+
+This is deprecated because it is clearer to write out :attr:`os.name` or
+:attr:`sys.platform` checks explicitly, especially in cases where it matters which is
+used.
+
+:note:
+    ``is_win`` is ``False`` on Cygwin, but is often wrongly assumed ``True``. To detect
+    Cygwin, use ``sys.platform == "cygwin"``.
+"""
+
+is_posix: bool
+"""Deprecated alias for ``os.name == "posix"`` to check for Unix-like ("POSIX") systems.
+
+This is deprecated because it clearer to write out :attr:`os.name` or
+:attr:`sys.platform` checks explicitly, especially in cases where it matters which is
+used.
+
+:note:
+    For POSIX systems, more detailed information is available in :attr:`sys.platform`,
+    while :attr:`os.name` is always ``"posix"`` on such systems, including macOS
+    (Darwin).
+"""
+
+is_darwin: bool
+"""Deprecated alias for ``sys.platform == "darwin"`` to check for macOS (Darwin).
+
+This is deprecated because it clearer to write out :attr:`os.name` or
+:attr:`sys.platform` checks explicitly.
+
+:note:
+    For macOS (Darwin), ``os.name == "posix"`` as in other Unix-like systems, while
+    ``sys.platform == "darwin"``.
+"""
+
+defenc = sys.getfilesystemencoding()
+"""The encoding used to convert between Unicode and bytes filenames."""
+
+
+@overload
+def safe_decode(s: None) -> None: ...
+
+
+@overload
+def safe_decode(s: AnyStr) -> str: ...
+
+
+def safe_decode(s: Union[AnyStr, None]) -> Optional[str]:
+    """Safely decode a binary string to Unicode."""
+    if isinstance(s, str):
+        return s
+    elif isinstance(s, bytes):
+        return s.decode(defenc, "surrogateescape")
+    elif s is None:
+        return None
+    else:
+        raise TypeError("Expected bytes or text, but got %r" % (s,))
+
+
+@overload
+def safe_encode(s: None) -> None: ...
+
+
+@overload
+def safe_encode(s: AnyStr) -> bytes: ...
+
+
+def safe_encode(s: Optional[AnyStr]) -> Optional[bytes]:
+    """Safely encode a binary string to Unicode."""
+    if isinstance(s, str):
+        return s.encode(defenc)
+    elif isinstance(s, bytes):
+        return s
+    elif s is None:
+        return None
+    else:
+        raise TypeError("Expected bytes or text, but got %r" % (s,))
+
+
+@overload
+def win_encode(s: None) -> None: ...
+
+
+@overload
+def win_encode(s: AnyStr) -> bytes: ...
+
+
+def win_encode(s: Optional[AnyStr]) -> Optional[bytes]:
+    """Encode Unicode strings for process arguments on Windows."""
+    if isinstance(s, str):
+        return s.encode(locale.getpreferredencoding(False))
+    elif isinstance(s, bytes):
+        return s
+    elif s is not None:
+        raise TypeError("Expected bytes or text, but got %r" % (s,))
+    return None

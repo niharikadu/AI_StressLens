@@ -1,165 +1,59 @@
-"""
-Errors, oh no!
-"""
+'''
+Custom exceptions raised by pytz.
+'''
 
-from __future__ import annotations
-
-from typing import TYPE_CHECKING, Any
-
-import attrs
-
-from referencing._attrs import frozen
-
-if TYPE_CHECKING:
-    from referencing import Resource
-    from referencing.typing import URI
+__all__ = [
+    'UnknownTimeZoneError', 'InvalidTimeError', 'AmbiguousTimeError',
+    'NonExistentTimeError',
+]
 
 
-@frozen
-class NoSuchResource(KeyError):
-    """
-    The given URI is not present in a registry.
-
-    Unlike most exceptions, this class *is* intended to be publicly
-    instantiable and *is* part of the public API of the package.
-    """
-
-    ref: URI
-
-    def __eq__(self, other: object) -> bool:
-        if self.__class__ is not other.__class__:
-            return NotImplemented
-        return attrs.astuple(self) == attrs.astuple(other)
-
-    def __hash__(self) -> int:
-        return hash(attrs.astuple(self))
+class Error(Exception):
+    '''Base class for all exceptions raised by the pytz library'''
 
 
-@frozen
-class NoInternalID(Exception):
-    """
-    A resource has no internal ID, but one is needed.
+class UnknownTimeZoneError(KeyError, Error):
+    '''Exception raised when pytz is passed an unknown timezone.
 
-    E.g. in modern JSON Schema drafts, this is the :kw:`$id` keyword.
+    >>> isinstance(UnknownTimeZoneError(), LookupError)
+    True
 
-    One might be needed if a resource was to-be added to a registry but no
-    other URI is available, and the resource doesn't declare its canonical URI.
-    """
+    This class is actually a subclass of KeyError to provide backwards
+    compatibility with code relying on the undocumented behavior of earlier
+    pytz releases.
 
-    resource: Resource[Any]
+    >>> isinstance(UnknownTimeZoneError(), KeyError)
+    True
 
-    def __eq__(self, other: object) -> bool:
-        if self.__class__ is not other.__class__:
-            return NotImplemented
-        return attrs.astuple(self) == attrs.astuple(other)
+    And also a subclass of pytz.exceptions.Error, as are other pytz
+    exceptions.
 
-    def __hash__(self) -> int:
-        return hash(attrs.astuple(self))
+    >>> isinstance(UnknownTimeZoneError(), Error)
+    True
 
-
-@frozen
-class Unretrievable(KeyError):
-    """
-    The given URI is not present in a registry, and retrieving it failed.
-    """
-
-    ref: URI
-
-    def __eq__(self, other: object) -> bool:
-        if self.__class__ is not other.__class__:
-            return NotImplemented
-        return attrs.astuple(self) == attrs.astuple(other)
-
-    def __hash__(self) -> int:
-        return hash(attrs.astuple(self))
+    '''
+    pass
 
 
-@frozen
-class CannotDetermineSpecification(Exception):
-    """
-    Attempting to detect the appropriate `Specification` failed.
-
-    This happens if no discernible information is found in the contents of the
-    new resource which would help identify it.
-    """
-
-    contents: Any
-
-    def __eq__(self, other: object) -> bool:
-        if self.__class__ is not other.__class__:
-            return NotImplemented
-        return attrs.astuple(self) == attrs.astuple(other)
-
-    def __hash__(self) -> int:
-        return hash(attrs.astuple(self))
+class InvalidTimeError(Error):
+    '''Base class for invalid time exceptions.'''
 
 
-@attrs.frozen  # Because here we allow subclassing below.
-class Unresolvable(Exception):
-    """
-    A reference was unresolvable.
-    """
+class AmbiguousTimeError(InvalidTimeError):
+    '''Exception raised when attempting to create an ambiguous wallclock time.
 
-    ref: URI
+    At the end of a DST transition period, a particular wallclock time will
+    occur twice (once before the clocks are set back, once after). Both
+    possibilities may be correct, unless further information is supplied.
 
-    def __eq__(self, other: object) -> bool:
-        if self.__class__ is not other.__class__:
-            return NotImplemented
-        return attrs.astuple(self) == attrs.astuple(other)
-
-    def __hash__(self) -> int:
-        return hash(attrs.astuple(self))
+    See DstTzInfo.normalize() for more info
+    '''
 
 
-@frozen
-class PointerToNowhere(Unresolvable):
-    """
-    A JSON Pointer leads to a part of a document that does not exist.
-    """
+class NonExistentTimeError(InvalidTimeError):
+    '''Exception raised when attempting to create a wallclock time that
+    cannot exist.
 
-    resource: Resource[Any]
-
-    def __str__(self) -> str:
-        msg = f"{self.ref!r} does not exist within {self.resource.contents!r}"
-        if self.ref == "/":
-            msg += (
-                ". The pointer '/' is a valid JSON Pointer but it points to "
-                "an empty string property ''. If you intended to point "
-                "to the entire resource, you should use '#'."
-            )
-        return msg
-
-
-@frozen
-class NoSuchAnchor(Unresolvable):
-    """
-    An anchor does not exist within a particular resource.
-    """
-
-    resource: Resource[Any]
-    anchor: str
-
-    def __str__(self) -> str:
-        return (
-            f"{self.anchor!r} does not exist within {self.resource.contents!r}"
-        )
-
-
-@frozen
-class InvalidAnchor(Unresolvable):
-    """
-    An anchor which could never exist in a resource was dereferenced.
-
-    It is somehow syntactically invalid.
-    """
-
-    resource: Resource[Any]
-    anchor: str
-
-    def __str__(self) -> str:
-        return (
-            f"'#{self.anchor}' is not a valid anchor, neither as a "
-            "plain name anchor nor as a JSON Pointer. You may have intended "
-            f"to use '#/{self.anchor}', as the slash is required *before each "
-            "segment* of a JSON pointer."
-        )
+    At the start of a DST transition period, the wallclock time jumps forward.
+    The instants jumped over never occur.
+    '''
