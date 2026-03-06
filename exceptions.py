@@ -1,59 +1,51 @@
-'''
-Custom exceptions raised by pytz.
-'''
+# --------------------------------------------------------------------------------------
+# Copyright (c) 2023-2024, Nucleic Development Team.
+#
+# Distributed under the terms of the Modified BSD License.
+#
+# The full license is in the file LICENSE, distributed with this software.
+# --------------------------------------------------------------------------------------
+"""Kiwi exceptions.
 
-__all__ = [
-    'UnknownTimeZoneError', 'InvalidTimeError', 'AmbiguousTimeError',
-    'NonExistentTimeError',
-]
+Imported by the kiwisolver C extension.
+
+"""
 
 
-class Error(Exception):
-    '''Base class for all exceptions raised by the pytz library'''
-
-
-class UnknownTimeZoneError(KeyError, Error):
-    '''Exception raised when pytz is passed an unknown timezone.
-
-    >>> isinstance(UnknownTimeZoneError(), LookupError)
-    True
-
-    This class is actually a subclass of KeyError to provide backwards
-    compatibility with code relying on the undocumented behavior of earlier
-    pytz releases.
-
-    >>> isinstance(UnknownTimeZoneError(), KeyError)
-    True
-
-    And also a subclass of pytz.exceptions.Error, as are other pytz
-    exceptions.
-
-    >>> isinstance(UnknownTimeZoneError(), Error)
-    True
-
-    '''
+class BadRequiredStrength(Exception):
     pass
 
 
-class InvalidTimeError(Error):
-    '''Base class for invalid time exceptions.'''
+class DuplicateConstraint(Exception):
+    __slots__ = ("constraint",)
+
+    def __init__(self, constraint):
+        self.constraint = constraint
 
 
-class AmbiguousTimeError(InvalidTimeError):
-    '''Exception raised when attempting to create an ambiguous wallclock time.
+class DuplicateEditVariable(Exception):
+    __slots__ = ("edit_variable",)
 
-    At the end of a DST transition period, a particular wallclock time will
-    occur twice (once before the clocks are set back, once after). Both
-    possibilities may be correct, unless further information is supplied.
-
-    See DstTzInfo.normalize() for more info
-    '''
+    def __init__(self, edit_variable):
+        self.edit_variable = edit_variable
 
 
-class NonExistentTimeError(InvalidTimeError):
-    '''Exception raised when attempting to create a wallclock time that
-    cannot exist.
+class UnknownConstraint(Exception):
+    __slots__ = ("constraint",)
 
-    At the start of a DST transition period, the wallclock time jumps forward.
-    The instants jumped over never occur.
-    '''
+    def __init__(self, constraint):
+        self.constraint = constraint
+
+
+class UnknownEditVariable(Exception):
+    __slots__ = ("edit_variable",)
+
+    def __init__(self, edit_variable):
+        self.edit_variable = edit_variable
+
+
+class UnsatisfiableConstraint(Exception):
+    __slots__ = ("constraint",)
+
+    def __init__(self, constraint):
+        self.constraint = constraint
