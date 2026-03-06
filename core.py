@@ -1,437 +1,399 @@
-import bisect
+import logging
 import re
-import unicodedata
-from typing import Optional, Union
+from collections.abc import Iterable
+from datetime import timedelta
 
-from . import idnadata
-from .intranges import intranges_contain
+from flask import current_app, request
+from werkzeug.datastructures import Headers, MultiDict
 
-_virama_combining_class = 9
-_alabel_prefix = b"xn--"
-_unicode_dots_re = re.compile("[\u002e\u3002\uff0e\uff61]")
+LOG = logging.getLogger(__name__)
 
+# Response Headers
+ACL_ORIGIN = "Access-Control-Allow-Origin"
+ACL_METHODS = "Access-Control-Allow-Methods"
+ACL_ALLOW_HEADERS = "Access-Control-Allow-Headers"
+ACL_EXPOSE_HEADERS = "Access-Control-Expose-Headers"
+ACL_CREDENTIALS = "Access-Control-Allow-Credentials"
+ACL_MAX_AGE = "Access-Control-Max-Age"
+ACL_RESPONSE_PRIVATE_NETWORK = "Access-Control-Allow-Private-Network"
 
-class IDNAError(UnicodeError):
-    """Base exception for all IDNA-encoding related problems"""
+# Request Header
+ACL_REQUEST_METHOD = "Access-Control-Request-Method"
+ACL_REQUEST_HEADERS = "Access-Control-Request-Headers"
+ACL_REQUEST_HEADER_PRIVATE_NETWORK = "Access-Control-Request-Private-Network"
 
-    pass
+ALL_METHODS = ["GET", "HEAD", "POST", "OPTIONS", "PUT", "PATCH", "DELETE"]
+CONFIG_OPTIONS = [
+    "CORS_ORIGINS",
+    "CORS_METHODS",
+    "CORS_ALLOW_HEADERS",
+    "CORS_EXPOSE_HEADERS",
+    "CORS_SUPPORTS_CREDENTIALS",
+    "CORS_MAX_AGE",
+    "CORS_SEND_WILDCARD",
+    "CORS_AUTOMATIC_OPTIONS",
+    "CORS_VARY_HEADER",
+    "CORS_RESOURCES",
+    "CORS_INTERCEPT_EXCEPTIONS",
+    "CORS_ALWAYS_SEND",
+    "CORS_ALLOW_PRIVATE_NETWORK",
+]
+# Attribute added to request object by decorator to indicate that CORS
+# was evaluated, in case the decorator and extension are both applied
+# to a view.
+FLASK_CORS_EVALUATED = "_FLASK_CORS_EVALUATED"
 
-
-class IDNABidiError(IDNAError):
-    """Exception when bidirectional requirements are not satisfied"""
-
-    pass
-
-
-class InvalidCodepoint(IDNAError):
-    """Exception when a disallowed or unallocated codepoint is used"""
-
-    pass
-
-
-class InvalidCodepointContext(IDNAError):
-    """Exception when the codepoint is not valid in the context it is used"""
-
-    pass
-
-
-def _combining_class(cp: int) -> int:
-    v = unicodedata.combining(chr(cp))
-    if v == 0:
-        if not unicodedata.name(chr(cp)):
-            raise ValueError("Unknown character in unicodedata")
-    return v
-
-
-def _is_script(cp: str, script: str) -> bool:
-    return intranges_contain(ord(cp), idnadata.scripts[script])
-
-
-def _punycode(s: str) -> bytes:
-    return s.encode("punycode")
-
-
-def _unot(s: int) -> str:
-    return "U+{:04X}".format(s)
-
-
-def valid_label_length(label: Union[bytes, str]) -> bool:
-    if len(label) > 63:
-        return False
-    return True
-
-
-def valid_string_length(label: Union[bytes, str], trailing_dot: bool) -> bool:
-    if len(label) > (254 if trailing_dot else 253):
-        return False
-    return True
+# Strange, but this gets the type of a compiled regex, which is otherwise not
+# exposed in a public API.
+RegexObject = type(re.compile(""))
+DEFAULT_OPTIONS = dict(
+    origins="*",
+    methods=ALL_METHODS,
+    allow_headers="*",
+    expose_headers=None,
+    supports_credentials=False,
+    max_age=None,
+    send_wildcard=False,
+    automatic_options=True,
+    vary_header=True,
+    resources=r"/*",
+    intercept_exceptions=True,
+    always_send=True,
+    allow_private_network=False,
+)
 
 
-def check_bidi(label: str, check_ltr: bool = False) -> bool:
-    # Bidi rules should only be applied if string contains RTL characters
-    bidi_label = False
-    for idx, cp in enumerate(label, 1):
-        direction = unicodedata.bidirectional(cp)
-        if direction == "":
-            # String likely comes from a newer version of Unicode
-            raise IDNABidiError("Unknown directionality in label {} at position {}".format(repr(label), idx))
-        if direction in ["R", "AL", "AN"]:
-            bidi_label = True
-    if not bidi_label and not check_ltr:
-        return True
+def parse_resources(resources):
+    if isinstance(resources, dict):
+        # To make the API more consistent with the decorator, allow a
+        # resource of '*', which is not actually a valid regexp.
+        resources = [(re_fix(k), v) for k, v in resources.items()]
 
-    # Bidi rule 1
-    direction = unicodedata.bidirectional(label[0])
-    if direction in ["R", "AL"]:
-        rtl = True
-    elif direction == "L":
-        rtl = False
-    else:
-        raise IDNABidiError("First codepoint in label {} must be directionality L, R or AL".format(repr(label)))
-
-    valid_ending = False
-    number_type: Optional[str] = None
-    for idx, cp in enumerate(label, 1):
-        direction = unicodedata.bidirectional(cp)
-
-        if rtl:
-            # Bidi rule 2
-            if direction not in [
-                "R",
-                "AL",
-                "AN",
-                "EN",
-                "ES",
-                "CS",
-                "ET",
-                "ON",
-                "BN",
-                "NSM",
-            ]:
-                raise IDNABidiError("Invalid direction for codepoint at position {} in a right-to-left label".format(idx))
-            # Bidi rule 3
-            if direction in ["R", "AL", "EN", "AN"]:
-                valid_ending = True
-            elif direction != "NSM":
-                valid_ending = False
-            # Bidi rule 4
-            if direction in ["AN", "EN"]:
-                if not number_type:
-                    number_type = direction
-                else:
-                    if number_type != direction:
-                        raise IDNABidiError("Can not mix numeral types in a right-to-left label")
-        else:
-            # Bidi rule 5
-            if direction not in ["L", "EN", "ES", "CS", "ET", "ON", "BN", "NSM"]:
-                raise IDNABidiError("Invalid direction for codepoint at position {} in a left-to-right label".format(idx))
-            # Bidi rule 6
-            if direction in ["L", "EN"]:
-                valid_ending = True
-            elif direction != "NSM":
-                valid_ending = False
-
-    if not valid_ending:
-        raise IDNABidiError("Label ends with illegal codepoint directionality")
-
-    return True
-
-
-def check_initial_combiner(label: str) -> bool:
-    if unicodedata.category(label[0])[0] == "M":
-        raise IDNAError("Label begins with an illegal combining character")
-    return True
-
-
-def check_hyphen_ok(label: str) -> bool:
-    if label[2:4] == "--":
-        raise IDNAError("Label has disallowed hyphens in 3rd and 4th position")
-    if label[0] == "-" or label[-1] == "-":
-        raise IDNAError("Label must not start or end with a hyphen")
-    return True
-
-
-def check_nfc(label: str) -> None:
-    if unicodedata.normalize("NFC", label) != label:
-        raise IDNAError("Label must be in Normalization Form C")
-
-
-def valid_contextj(label: str, pos: int) -> bool:
-    cp_value = ord(label[pos])
-
-    if cp_value == 0x200C:
-        if pos > 0:
-            if _combining_class(ord(label[pos - 1])) == _virama_combining_class:
-                return True
-
-        ok = False
-        for i in range(pos - 1, -1, -1):
-            joining_type = idnadata.joining_types.get(ord(label[i]))
-            if joining_type == ord("T"):
-                continue
-            elif joining_type in [ord("L"), ord("D")]:
-                ok = True
-                break
+        # Sort patterns with static (literal) paths first, then by regex specificity
+        def sort_key(pair):
+            pattern, _ = pair
+            if isinstance(pattern, RegexObject):
+                return (1, 0, -pattern.pattern.count("/"), -len(pattern.pattern))
+            elif probably_regex(pattern):
+                return (1, 1, -pattern.count("/"), -len(pattern))
             else:
-                break
+                return (0, 0, -pattern.count("/"), -len(pattern))
 
-        if not ok:
+        return sorted(resources, key=sort_key)
+
+    elif isinstance(resources, str):
+        return [(re_fix(resources), {})]
+
+    elif isinstance(resources, Iterable):
+        return [(re_fix(r), {}) for r in resources]
+
+    # Type of compiled regex is not part of the public API. Test for this
+    # at runtime.
+    elif isinstance(resources, RegexObject):
+        return [(re_fix(resources), {})]
+
+    else:
+        raise ValueError("Unexpected value for resources argument.")
+
+
+def get_regexp_pattern(regexp):
+    """
+    Helper that returns regexp pattern from given value.
+
+    :param regexp: regular expression to stringify
+    :type regexp: _sre.SRE_Pattern or str
+    :returns: string representation of given regexp pattern
+    :rtype: str
+    """
+    try:
+        return regexp.pattern
+    except AttributeError:
+        return str(regexp)
+
+
+def get_cors_origins(options, request_origin):
+    origins = options.get("origins")
+    wildcard = r".*" in origins
+
+    # If the Origin header is not present terminate this set of steps.
+    # The request is outside the scope of this specification.-- W3Spec
+    if request_origin:
+        LOG.debug("CORS request received with 'Origin' %s", request_origin)
+
+        # If the allowed origins is an asterisk or 'wildcard', always match
+        if wildcard and options.get("send_wildcard"):
+            LOG.debug("Allowed origins are set to '*'. Sending wildcard CORS header.")
+            return ["*"]
+        # If the value of the Origin header is a case-insensitive match
+        # for any of the values in list of origins.
+        # NOTE: Per RFC 1035 and RFC 4343 schemes and hostnames are case insensitive.
+        elif try_match_any_pattern(request_origin, origins, caseSensitive=False):
+            LOG.debug(
+                "The request's Origin header matches. Sending CORS headers.",
+            )
+            # Add a single Access-Control-Allow-Origin header, with either
+            # the value of the Origin header or the string "*" as value.
+            # -- W3Spec
+            return [request_origin]
+        else:
+            LOG.debug("The request's Origin header does not match any of allowed origins.")
+            return None
+
+    elif options.get("always_send"):
+        if wildcard:
+            # If wildcard is in the origins, even if 'send_wildcard' is False,
+            # simply send the wildcard. Unless supports_credentials is True,
+            # since that is forbidden by the spec..
+            # It is the most-likely to be correct thing to do (the only other
+            # option is to return nothing, which  almost certainly not what
+            # the developer wants if the '*' origin was specified.
+            if options.get("supports_credentials"):
+                return None
+            else:
+                return ["*"]
+        else:
+            # Return all origins that are not regexes.
+            return sorted([o for o in origins if not probably_regex(o)])
+
+    # Terminate these steps, return the original request untouched.
+    else:
+        LOG.debug(
+            "The request did not contain an 'Origin' header. This means the browser or client did not request CORS, ensure the Origin Header is set."
+        )
+        return None
+
+
+def get_allow_headers(options, acl_request_headers):
+    if acl_request_headers:
+        request_headers = [h.strip() for h in acl_request_headers.split(",")]
+
+        # any header that matches in the allow_headers
+        matching_headers = filter(lambda h: try_match_any_pattern(h, options.get("allow_headers"), caseSensitive=False), request_headers)
+
+        return ", ".join(sorted(matching_headers))
+
+    return None
+
+
+def get_cors_headers(options, request_headers, request_method):
+    origins_to_set = get_cors_origins(options, request_headers.get("Origin"))
+    headers = MultiDict()
+
+    if not origins_to_set:  # CORS is not enabled for this route
+        return headers
+
+    for origin in origins_to_set:
+        headers.add(ACL_ORIGIN, origin)
+
+    headers[ACL_EXPOSE_HEADERS] = options.get("expose_headers")
+
+    if options.get("supports_credentials"):
+        headers[ACL_CREDENTIALS] = "true"  # case sensitive
+
+    if (
+        ACL_REQUEST_HEADER_PRIVATE_NETWORK in request_headers
+        and request_headers.get(ACL_REQUEST_HEADER_PRIVATE_NETWORK) == "true"
+    ):
+        allow_private_network = "true" if options.get("allow_private_network") else "false"
+        headers[ACL_RESPONSE_PRIVATE_NETWORK] = allow_private_network
+
+    # This is a preflight request
+    # http://www.w3.org/TR/cors/#resource-preflight-requests
+    if request_method == "OPTIONS":
+        acl_request_method = request_headers.get(ACL_REQUEST_METHOD, "").upper()
+
+        # If there is no Access-Control-Request-Method header or if parsing
+        # failed, do not set any additional headers
+        if acl_request_method and acl_request_method in options.get("methods"):
+            # If method is not a case-sensitive match for any of the values in
+            # list of methods do not set any additional headers and terminate
+            # this set of steps.
+            headers[ACL_ALLOW_HEADERS] = get_allow_headers(options, request_headers.get(ACL_REQUEST_HEADERS))
+            headers[ACL_MAX_AGE] = options.get("max_age")
+            headers[ACL_METHODS] = options.get("methods")
+        else:
+            LOG.info(
+                "The request's Access-Control-Request-Method header does not match allowed methods. CORS headers will not be applied."
+            )
+
+    # http://www.w3.org/TR/cors/#resource-implementation
+    if options.get("vary_header"):
+        # Only set header if the origin returned will vary dynamically,
+        # i.e. if we are not returning an asterisk, and there are multiple
+        # origins that can be matched.
+        if headers[ACL_ORIGIN] == "*":
+            pass
+        elif (
+            len(options.get("origins")) > 1
+            or len(origins_to_set) > 1
+            or any(map(probably_regex, options.get("origins")))
+        ):
+            headers.add("Vary", "Origin")
+
+    return MultiDict((k, v) for k, v in headers.items() if v)
+
+
+def set_cors_headers(resp, options):
+    """
+    Performs the actual evaluation of Flask-CORS options and actually
+    modifies the response object.
+
+    This function is used both in the decorator and the after_request
+    callback
+    """
+
+    # If CORS has already been evaluated via the decorator, skip
+    if hasattr(resp, FLASK_CORS_EVALUATED):
+        LOG.debug("CORS have been already evaluated, skipping")
+        return resp
+
+    # Some libraries, like OAuthlib, set resp.headers to non Multidict
+    # objects (Werkzeug Headers work as well). This is a problem because
+    # headers allow repeated values.
+    if not isinstance(resp.headers, Headers) and not isinstance(resp.headers, MultiDict):
+        resp.headers = MultiDict(resp.headers)
+
+    headers_to_set = get_cors_headers(options, request.headers, request.method)
+
+    LOG.debug("Settings CORS headers: %s", str(headers_to_set))
+
+    for k, v in headers_to_set.items():
+        resp.headers.add(k, v)
+
+    return resp
+
+
+def probably_regex(maybe_regex):
+    if isinstance(maybe_regex, RegexObject):
+        return True
+    else:
+        common_regex_chars = ["*", "\\", "]", "?", "$", "^", "[", "]", "(", ")"]
+        # Use common characters used in regular expressions as a proxy
+        # for if this string is in fact a regex.
+        return any(c in maybe_regex for c in common_regex_chars)
+
+
+def re_fix(reg):
+    """
+    Replace the invalid regex r'*' with the valid, wildcard regex r'/.*' to
+    enable the CORS app extension to have a more user friendly api.
+    """
+    return r".*" if reg == r"*" else reg
+
+
+def try_match_any_pattern(inst, patterns, caseSensitive=True):
+    return any(try_match_pattern(inst, pattern, caseSensitive) for pattern in patterns)
+
+def try_match_pattern(value, pattern, caseSensitive=True):
+    """
+    Safely attempts to match a pattern or string to a value. This
+    function can be used to match request origins, headers, or paths.
+    The value of caseSensitive should be set in accordance to the
+    data being compared e.g. origins and headers are case insensitive
+    whereas paths are case-sensitive
+    """
+    if isinstance(pattern, RegexObject):
+        return re.match(pattern, value)
+    if probably_regex(pattern):
+        flags = 0 if caseSensitive else re.IGNORECASE
+        try:
+            return re.match(pattern, value, flags=flags)
+        except re.error:
             return False
-
-        ok = False
-        for i in range(pos + 1, len(label)):
-            joining_type = idnadata.joining_types.get(ord(label[i]))
-            if joining_type == ord("T"):
-                continue
-            elif joining_type in [ord("R"), ord("D")]:
-                ok = True
-                break
-            else:
-                break
-        return ok
-
-    if cp_value == 0x200D:
-        if pos > 0:
-            if _combining_class(ord(label[pos - 1])) == _virama_combining_class:
-                return True
-        return False
-
-    else:
-        return False
-
-
-def valid_contexto(label: str, pos: int, exception: bool = False) -> bool:
-    cp_value = ord(label[pos])
-
-    if cp_value == 0x00B7:
-        if 0 < pos < len(label) - 1:
-            if ord(label[pos - 1]) == 0x006C and ord(label[pos + 1]) == 0x006C:
-                return True
-        return False
-
-    elif cp_value == 0x0375:
-        if pos < len(label) - 1 and len(label) > 1:
-            return _is_script(label[pos + 1], "Greek")
-        return False
-
-    elif cp_value == 0x05F3 or cp_value == 0x05F4:
-        if pos > 0:
-            return _is_script(label[pos - 1], "Hebrew")
-        return False
-
-    elif cp_value == 0x30FB:
-        for cp in label:
-            if cp == "\u30fb":
-                continue
-            if _is_script(cp, "Hiragana") or _is_script(cp, "Katakana") or _is_script(cp, "Han"):
-                return True
-        return False
-
-    elif 0x660 <= cp_value <= 0x669:
-        for cp in label:
-            if 0x6F0 <= ord(cp) <= 0x06F9:
-                return False
-        return True
-
-    elif 0x6F0 <= cp_value <= 0x6F9:
-        for cp in label:
-            if 0x660 <= ord(cp) <= 0x0669:
-                return False
-        return True
-
-    return False
-
-
-def check_label(label: Union[str, bytes, bytearray]) -> None:
-    if isinstance(label, (bytes, bytearray)):
-        label = label.decode("utf-8")
-    if len(label) == 0:
-        raise IDNAError("Empty Label")
-
-    check_nfc(label)
-    check_hyphen_ok(label)
-    check_initial_combiner(label)
-
-    for pos, cp in enumerate(label):
-        cp_value = ord(cp)
-        if intranges_contain(cp_value, idnadata.codepoint_classes["PVALID"]):
-            continue
-        elif intranges_contain(cp_value, idnadata.codepoint_classes["CONTEXTJ"]):
-            try:
-                if not valid_contextj(label, pos):
-                    raise InvalidCodepointContext(
-                        "Joiner {} not allowed at position {} in {}".format(_unot(cp_value), pos + 1, repr(label))
-                    )
-            except ValueError:
-                raise IDNAError(
-                    "Unknown codepoint adjacent to joiner {} at position {} in {}".format(
-                        _unot(cp_value), pos + 1, repr(label)
-                    )
-                )
-        elif intranges_contain(cp_value, idnadata.codepoint_classes["CONTEXTO"]):
-            if not valid_contexto(label, pos):
-                raise InvalidCodepointContext(
-                    "Codepoint {} not allowed at position {} in {}".format(_unot(cp_value), pos + 1, repr(label))
-                )
-        else:
-            raise InvalidCodepoint(
-                "Codepoint {} at position {} of {} not allowed".format(_unot(cp_value), pos + 1, repr(label))
-            )
-
-    check_bidi(label)
-
-
-def alabel(label: str) -> bytes:
     try:
-        label_bytes = label.encode("ascii")
-        ulabel(label_bytes)
-        if not valid_label_length(label_bytes):
-            raise IDNAError("Label too long")
-        return label_bytes
-    except UnicodeEncodeError:
-        pass
+        v = str(value)
+        p = str(pattern)
+        return v == p if caseSensitive else v.casefold() == p.casefold()
+    except Exception:
+        return value == pattern
 
-    check_label(label)
-    label_bytes = _alabel_prefix + _punycode(label)
+def get_cors_options(appInstance, *dicts):
+    """
+    Compute CORS options for an application by combining the DEFAULT_OPTIONS,
+    the app's configuration-specified options and any dictionaries passed. The
+    last specified option wins.
+    """
+    options = DEFAULT_OPTIONS.copy()
+    options.update(get_app_kwarg_dict(appInstance))
+    if dicts:
+        for d in dicts:
+            options.update(d)
 
-    if not valid_label_length(label_bytes):
-        raise IDNAError("Label too long")
-
-    return label_bytes
+    return serialize_options(options)
 
 
-def ulabel(label: Union[str, bytes, bytearray]) -> str:
-    if not isinstance(label, (bytes, bytearray)):
-        try:
-            label_bytes = label.encode("ascii")
-        except UnicodeEncodeError:
-            check_label(label)
-            return label
+def get_app_kwarg_dict(appInstance=None):
+    """Returns the dictionary of CORS specific app configurations."""
+    app = appInstance or current_app
+
+    # In order to support blueprints which do not have a config attribute
+    app_config = getattr(app, "config", {})
+
+    return {k.lower().replace("cors_", ""): app_config.get(k) for k in CONFIG_OPTIONS if app_config.get(k) is not None}
+
+
+def flexible_str(obj):
+    """
+    A more flexible str function which intelligently handles stringifying
+    strings, lists and other iterables. The results are lexographically sorted
+    to ensure generated responses are consistent when iterables such as Set
+    are used.
+    """
+    if obj is None:
+        return None
+    elif not isinstance(obj, str) and isinstance(obj, Iterable):
+        return ", ".join(str(item) for item in sorted(obj))
     else:
-        label_bytes = bytes(label)
+        return str(obj)
 
-    label_bytes = label_bytes.lower()
-    if label_bytes.startswith(_alabel_prefix):
-        label_bytes = label_bytes[len(_alabel_prefix) :]
-        if not label_bytes:
-            raise IDNAError("Malformed A-label, no Punycode eligible content found")
-        if label_bytes.decode("ascii")[-1] == "-":
-            raise IDNAError("A-label must not end with a hyphen")
+
+def serialize_option(options_dict, key, upper=False):
+    if key in options_dict:
+        value = flexible_str(options_dict[key])
+        options_dict[key] = value.upper() if upper else value
+
+
+def ensure_iterable(inst):
+    """
+    Wraps scalars or string types as a list, or returns the iterable instance.
+    """
+    if isinstance(inst, str) or not isinstance(inst, Iterable):
+        return [inst]
     else:
-        check_label(label_bytes)
-        return label_bytes.decode("ascii")
-
-    try:
-        label = label_bytes.decode("punycode")
-    except UnicodeError:
-        raise IDNAError("Invalid A-label")
-    check_label(label)
-    return label
+        return inst
 
 
-def uts46_remap(domain: str, std3_rules: bool = True, transitional: bool = False) -> str:
-    """Re-map the characters in the string according to UTS46 processing."""
-    from .uts46data import uts46data
-
-    output = ""
-
-    for pos, char in enumerate(domain):
-        code_point = ord(char)
-        try:
-            uts46row = uts46data[code_point if code_point < 256 else bisect.bisect_left(uts46data, (code_point, "Z")) - 1]
-            status = uts46row[1]
-            replacement: Optional[str] = None
-            if len(uts46row) == 3:
-                replacement = uts46row[2]
-            if (
-                status == "V"
-                or (status == "D" and not transitional)
-                or (status == "3" and not std3_rules and replacement is None)
-            ):
-                output += char
-            elif replacement is not None and (
-                status == "M" or (status == "3" and not std3_rules) or (status == "D" and transitional)
-            ):
-                output += replacement
-            elif status != "I":
-                raise IndexError()
-        except IndexError:
-            raise InvalidCodepoint(
-                "Codepoint {} not allowed at position {} in {}".format(_unot(code_point), pos + 1, repr(domain))
-            )
-
-    return unicodedata.normalize("NFC", output)
+def sanitize_regex_param(param):
+    return [re_fix(x) for x in ensure_iterable(param)]
 
 
-def encode(
-    s: Union[str, bytes, bytearray],
-    strict: bool = False,
-    uts46: bool = False,
-    std3_rules: bool = False,
-    transitional: bool = False,
-) -> bytes:
-    if not isinstance(s, str):
-        try:
-            s = str(s, "ascii")
-        except UnicodeDecodeError:
-            raise IDNAError("should pass a unicode string to the function rather than a byte string.")
-    if uts46:
-        s = uts46_remap(s, std3_rules, transitional)
-    trailing_dot = False
-    result = []
-    if strict:
-        labels = s.split(".")
-    else:
-        labels = _unicode_dots_re.split(s)
-    if not labels or labels == [""]:
-        raise IDNAError("Empty domain")
-    if labels[-1] == "":
-        del labels[-1]
-        trailing_dot = True
-    for label in labels:
-        s = alabel(label)
-        if s:
-            result.append(s)
-        else:
-            raise IDNAError("Empty label")
-    if trailing_dot:
-        result.append(b"")
-    s = b".".join(result)
-    if not valid_string_length(s, trailing_dot):
-        raise IDNAError("Domain too long")
-    return s
+def serialize_options(opts):
+    """
+    A helper method to serialize and processes the options dictionary.
+    """
+    options = (opts or {}).copy()
 
+    for key in opts.keys():
+        if key not in DEFAULT_OPTIONS:
+            LOG.warning("Unknown option passed to Flask-CORS: %s", key)
 
-def decode(
-    s: Union[str, bytes, bytearray],
-    strict: bool = False,
-    uts46: bool = False,
-    std3_rules: bool = False,
-) -> str:
-    try:
-        if not isinstance(s, str):
-            s = str(s, "ascii")
-    except UnicodeDecodeError:
-        raise IDNAError("Invalid ASCII in A-label")
-    if uts46:
-        s = uts46_remap(s, std3_rules, False)
-    trailing_dot = False
-    result = []
-    if not strict:
-        labels = _unicode_dots_re.split(s)
-    else:
-        labels = s.split(".")
-    if not labels or labels == [""]:
-        raise IDNAError("Empty domain")
-    if not labels[-1]:
-        del labels[-1]
-        trailing_dot = True
-    for label in labels:
-        s = ulabel(label)
-        if s:
-            result.append(s)
-        else:
-            raise IDNAError("Empty label")
-    if trailing_dot:
-        result.append("")
-    return ".".join(result)
+    # Ensure origins is a list of allowed origins with at least one entry.
+    options["origins"] = sanitize_regex_param(options.get("origins"))
+    options["allow_headers"] = sanitize_regex_param(options.get("allow_headers"))
+
+    # This is expressly forbidden by the spec. Raise a value error so people
+    # don't get burned in production.
+    if r".*" in options["origins"] and options["supports_credentials"] and options["send_wildcard"]:
+        raise ValueError(
+            "Cannot use supports_credentials in conjunction with"
+            "an origin string of '*'. See: "
+            "http://www.w3.org/TR/cors/#resource-requests"
+        )
+
+    serialize_option(options, "expose_headers")
+    serialize_option(options, "methods", upper=True)
+
+    if isinstance(options.get("max_age"), timedelta):
+        options["max_age"] = str(int(options["max_age"].total_seconds()))
+
+    return options
